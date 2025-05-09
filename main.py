@@ -132,31 +132,44 @@ class FileTransferServer:
                     response = self.gui_update.show_transfer_prompt(addr[0], filename, filesize)
                     client.send(response.encode())
                     if response == 'ACCEPT':
-                        self._initiate_transfer(addr[0], filename, filesize)
+                        threading.Thread(target=self._initiate_transfer, args=(addr[0], filename, filesize), daemon=True).start()
                 else:
                     client.send("DECLINE".encode())
         finally:
             client.close()
 
     def _initiate_transfer(self, sender_ip, filename, filesize):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('0.0.0.0', DATA_PORT))
-            s.listen(1)
-            conn, _ = s.accept()
-            with conn:
-                with open(filename, 'wb') as f:
-                    total_received = 0
-                    while total_received < int(filesize):
-                        data = conn.recv(4096)
-                        total_received += len(data)
-                        f.write(data)
+        try:
+            self.gui_update.start_transfer(False)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', DATA_PORT))
+                s.listen(1)
+                conn, _ = s.accept()
+                with conn:
+                    with open(filename, 'wb') as f:
+                        total_received = 0
+                        while total_received < int(filesize):
+                            data = conn.recv(4096)
+                            if not data:
+                                break
+                            total_received += len(data)
+                            f.write(data)
+                            self.gui_update.after(0, self.gui_update.update_transfer_progress, total_received, int(filesize))
+            if total_received == int(filesize):
+                self.gui_update.after(0, messagebox.showinfo, "Success", "File received successfully")
+            else:
+                self.gui_update.after(0, messagebox.showerror, "Error", "Incomplete file received")
+        except Exception as e:
+            self.gui_update.after(0, messagebox.showerror, "Error", f"Receive failed: {str(e)}")
+        finally:
+            self.gui_update.after(0, self.gui_update.reset_transfer_progress)
 
 class ModernGUI(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("CyberSend v2.0")
         self.geometry("1000x800")
-        self.configure(bg='#2c3e50')
+        self.configure(bg='#1e2a38')
         self.style = ttk.Style()
         self._configure_styles()
         self.scanner = NetworkScanner()
@@ -165,6 +178,8 @@ class ModernGUI(TkinterDnD.Tk):
         self.current_progress = 0
         self.total_progress = 1
         self.loader_angle = 0
+        self.transfer_start_time = None
+        self.is_sending = None
         self.show_splash_screen()
         self._create_widgets()
         self.server.start_server()
@@ -199,28 +214,32 @@ class ModernGUI(TkinterDnD.Tk):
 
     def _configure_styles(self):
         self.style.theme_use('clam')
-        self.style.configure('TFrame', background='#2c3e50')
-        self.style.configure('TLabel', background='#2c3e50', foreground='#ecf0f1', font=('Arial', 12))
-        self.style.configure('TButton', background='#3498db', foreground='white', font=('Arial', 10), borderwidth=0)
-        self.style.configure('Treeview', background='#34495e', fieldbackground='#34495e', foreground='#ecf0f1', rowheight=25)
-        self.style.configure('Treeview.Heading', font=('Arial', 10, 'bold'))
-        self.style.map('TButton', background=[('active', '#2980b9')])
-        self.style.configure('Red.Horizontal.TProgressbar', background='#e74c3c', troughcolor='#2c3e50')
-        self.style.configure('Green.Horizontal.TProgressbar', background='#2ecc71', troughcolor='#2c3e50')
+        self.style.configure('TFrame', background='#1e2a38')
+        self.style.configure('TLabel', background='#1e2a38', foreground='#dfe6e9', font=('Helvetica', 12))
+        self.style.configure('TButton', background='#3498db', foreground='white', font=('Helvetica', 10, 'bold'), borderwidth=0, padding=5)
+        self.style.configure('Treeview', background='#2d3b4e', fieldbackground='#2d3b4e', foreground='#dfe6e9', rowheight=30)
+        self.style.configure('Treeview.Heading', font=('Helvetica', 11, 'bold'), background='#3498db', foreground='white')
+        self.style.map('TButton', background=[('active', '#2980b9'), ('hover', '#4a90e2')], relief=[('active', 'flat')])
+        self.style.configure('Red.Horizontal.TProgressbar', background='#e74c3c', troughcolor='#1e2a38', thickness=20)
+        self.style.configure('Green.Horizontal.TProgressbar', background='#2ecc71', troughcolor='#1e2a38', thickness=20)
 
     def _create_widgets(self):
-        main_frame = ttk.Frame(self)
+        main_frame = ttk.Frame(self, style='TFrame')
         main_frame.pack(expand=True, fill='both', padx=30, pady=30)
-        self.interface_combo = ttk.Combobox(main_frame, state='readonly')
+        self.interface_combo = ttk.Combobox(main_frame, state='readonly', font=('Helvetica', 11))
         self.interface_combo.pack(fill='x', pady=10)
         self._load_interfaces()
         scan_frame = ttk.Frame(main_frame)
         scan_frame.pack(fill='x', pady=10)
         self.scan_btn = ttk.Button(scan_frame, text="Scan Network", command=self.start_scan)
         self.scan_btn.pack(side='left', padx=5)
+        self.scan_btn.bind('<Enter>', lambda e: self.scan_btn.state(['hover']))
+        self.scan_btn.bind('<Leave>', lambda e: self.scan_btn.state(['!hover']))
         self.stop_btn = ttk.Button(scan_frame, text="Stop Scan", command=self.stop_scan, state='disabled')
         self.stop_btn.pack(side='left', padx=5)
-        self.loader_canvas = tk.Canvas(main_frame, width=50, height=50, bg='#2c3e50', highlightthickness=0)
+        self.stop_btn.bind('<Enter>', lambda e: self.stop_btn.state(['hover']))
+        self.stop_btn.bind('<Leave>', lambda e: self.stop_btn.state(['!hover']))
+        self.loader_canvas = tk.Canvas(main_frame, width=50, height=50, bg='#1e2a38', highlightthickness=0)
         self.loader_canvas.pack(pady=5)
         self.scan_progress = ttk.Progressbar(main_frame, style='Green.Horizontal.TProgressbar', mode='determinate')
         self.scan_progress.pack(fill='x', pady=5)
@@ -236,6 +255,8 @@ class ModernGUI(TkinterDnD.Tk):
         control_frame.pack(fill='x', pady=10)
         self.transfer_btn = ttk.Button(control_frame, text="Send File", command=self.select_file)
         self.transfer_btn.pack(side='right', padx=5)
+        self.transfer_btn.bind('<Enter>', lambda e: self.transfer_btn.state(['hover']))
+        self.transfer_btn.bind('<Leave>', lambda e: self.transfer_btn.state(['!hover']))
         self.transfer_progress = ttk.Progressbar(main_frame, style='Red.Horizontal.TProgressbar', mode='determinate')
         self.transfer_progress.pack(fill='x', pady=5)
         self.transfer_label = ttk.Label(main_frame, text="No active transfers")
@@ -313,7 +334,7 @@ class ModernGUI(TkinterDnD.Tk):
         start_angle = self.loader_angle
         end_angle = start_angle + 90
         self.loader_canvas.create_arc(center_x - radius, center_y - radius, center_x + radius, center_y + radius,
-                                      start=start_angle, extent=90, style=tk.ARC, outline="#ecf0f1", width=4, tags="loader")
+                                      start=start_angle, extent=90, style=tk.ARC, outline="#dfe6e9", width=4, tags="loader")
         self.loader_angle = (self.loader_angle + 10) % 360
 
     def _stop_loader_animation(self):
@@ -349,20 +370,57 @@ class ModernGUI(TkinterDnD.Tk):
                 s.send(f"TRANSFER_REQUEST|{filename}:{filesize}".encode())
                 response = s.recv(1024).decode()
                 if response == 'ACCEPT':
+                    self.start_transfer(True)
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
                         data_socket.settimeout(30)
                         data_socket.connect((target_ip, DATA_PORT))
-                        self._send_file(data_socket, file_path)
+                        self._send_file(data_socket, file_path, filesize)
                     self.after(0, messagebox.showinfo, "Success", "Transfer completed")
                 else:
                     self.after(0, messagebox.showinfo, "Declined", "Recipient declined transfer")
         except Exception as e:
             self.after(0, messagebox.showerror, "Error", f"Transfer failed: {str(e)}")
+        finally:
+            self.after(0, self.reset_transfer_progress)
 
-    def _send_file(self, data_socket, file_path):
+    def _send_file(self, data_socket, file_path, filesize):
+        total_sent = 0
         with open(file_path, 'rb') as f:
             while chunk := f.read(4096):
                 data_socket.send(chunk)
+                total_sent += len(chunk)
+                self.after(0, self.update_transfer_progress, total_sent, filesize)
+
+    def start_transfer(self, is_sending):
+        self.transfer_start_time = time.time()
+        self.is_sending = is_sending
+        self.transfer_progress['value'] = 0
+        if is_sending:
+            self.transfer_label.config(text="Sending file...")
+        else:
+            self.transfer_label.config(text="Receiving file...")
+
+    def update_transfer_progress(self, transferred, total):
+        progress = (transferred / total) * 100
+        self.transfer_progress['value'] = progress
+        time_elapsed = time.time() - self.transfer_start_time
+        speed_str = "Calculating..." if time_elapsed <= 0 else self._format_speed(transferred / time_elapsed)
+        action = "Sending" if self.is_sending else "Receiving"
+        self.transfer_label.config(text=f"{action}: {transferred}/{total} bytes ({progress:.1f}%) - Speed: {speed_str}")
+
+    def reset_transfer_progress(self):
+        self.transfer_progress['value'] = 0
+        self.transfer_label.config(text="No active transfers")
+        self.transfer_start_time = None
+        self.is_sending = None
+
+    def _format_speed(self, speed):
+        if speed < 1024:
+            return f"{speed:.1f} B/s"
+        elif speed < 1024 * 1024:
+            return f"{speed / 1024:.1f} KB/s"
+        else:
+            return f"{speed / (1024 * 1024):.1f} MB/s"
 
     def show_transfer_prompt(self, sender_ip, filename, filesize):
         result = messagebox.askquestion(
